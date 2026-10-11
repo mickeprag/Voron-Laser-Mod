@@ -131,6 +131,8 @@ It is very difficult to determine with absolute coordinates where the laser is g
 
 #### Installation
 
+The laser panel requires KlipperScreen v0.3.4 or newer. Older versions fail with "Unable to load panel laser".
+
 1. Copy the files to corresponding folders
    - Copy the files (panels & styles) from [KlipperScreen](/KlipperScreen) to local installation folder
    - Copy the [KlipperScreen.conf](/klipper_config/KlipperScreen.conf) to local folder where the configs are stored
