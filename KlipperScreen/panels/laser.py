@@ -17,6 +17,11 @@ from panels.menu import Panel as MenuPanel
 class Panel(MenuPanel):
     distances = ['.1', '.5', '1', '5', '10', '25', '50']
     distance = distances[2]
+    # Left-column buttons highlighted while the output pin is non-zero
+    state_pins = {
+        'laser_switch': "output_pin laser_switch_pin",
+        'laser_test_mode': "output_pin laser_pwm_pin",
+    }
 
     def __init__(self, screen, title, items=None):
         if items is None:
@@ -25,7 +30,6 @@ class Panel(MenuPanel):
         super().__init__(screen, title, items)
         logging.info("### Making LaserMenu")
         self.dist_buttons = {}
-        self.buttons = {}
 
         grid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True, hexpand=True, vexpand=True)
         grid.attach(self.create_left_panel(), 0, 0, 1, 1)
@@ -59,35 +63,12 @@ class Panel(MenuPanel):
             self.scroll.remove(child)
         columns = 3 if self._screen.vertical_mode else 2
         self.scroll.add(self.arrangeMenuItems(self.items_right, columns, True))
-        self.update_button_visibility()
-
-    def update_button_visibility(self):
-        for key, button in self.buttons.items():
-            visible = self._config.get_config().getboolean(f"graph {self._screen.connected_printer}",
-                                                           key, fallback=False)
-            button['visible'] = visible
-            if visible:
-                button['widget'].get_style_context().add_class(button['class'])
-            else:
-                button['widget'].get_style_context().remove_class(button['class'])
-
-    def toggle_visibility(self, widget, key):
-        self.buttons[key]['visible'] ^= True
-        section = f"graph {self._screen.connected_printer}"
-        if section not in self._config.get_config().sections():
-            self._config.get_config().add_section(section)
-        self._config.set(section, key, f"{self.buttons[key]['visible']}")
-        self._config.save_user_config_options()
-        self.update_button_visibility()
 
     def create_left_panel(self):
         top = Gtk.Grid(row_homogeneous=True, column_homogeneous=True)
         enabled = [next(iter(entry)) for entry in self.items_left
                    if self.evaluate_enable(next(iter(entry.values()))['enable'])]
         for i, key in enumerate(enabled):
-            # graph_label_laser_<n> classes are defined in the laser theme's style.css
-            self.buttons[key] = {"widget": self.labels[key], "class": f"graph_label_laser_{i + 2}", "visible": False}
-            self.labels[key].connect("clicked", self.toggle_visibility, key)
             top.attach(self.labels[key], i % 2, i // 2, 1, 1)
 
         zgrid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True)
@@ -113,6 +94,18 @@ class Panel(MenuPanel):
         left.attach(zgrid, 0, 2, 1, 2)
         left.attach(distgrid, 0, 4, 1, 1)
         return left
+
+    def process_update(self, action, data):
+        if action != "notify_status_update":
+            return
+        for key, pin in self.state_pins.items():
+            if key not in self.labels or pin not in data or 'value' not in data[pin]:
+                continue
+            ctx = self.labels[key].get_style_context()
+            if data[pin]['value'] > 0:
+                ctx.add_class("button_active")
+            else:
+                ctx.remove_class("button_active")
 
     def change_distance(self, widget, distance):
         logging.info(f"### Distance {distance}")
