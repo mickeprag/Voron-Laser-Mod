@@ -9,7 +9,7 @@ import logging
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import GLib, Gtk
 from ks_includes.KlippyGcodes import KlippyGcodes
 from panels.menu import Panel as MenuPanel
 
@@ -17,19 +17,24 @@ from panels.menu import Panel as MenuPanel
 class Panel(MenuPanel):
     distances = ['.1', '.5', '1', '5', '10', '25', '50']
     distance = distances[2]
-    # Left-column buttons highlighted while the output pin is non-zero
+    # Left-column buttons highlighted while the pin is non-zero; each pin may be an output_pin or a pwm_tool
     state_pins = {
-        'laser_switch': "output_pin laser_switch_pin",
-        'laser_test_mode': "output_pin laser_pwm_pin",
+        'laser_switch': "laser_switch_pin",
+        'laser_test_mode': "laser_pwm_pin",
     }
+    poll_interval_ms = 500
+    poll_timer = None
 
     def __init__(self, screen, title, items=None):
+        # Stop a poll left running from before a reinit
+        self.deactivate()
         if items is None:
             items = screen._config.get_menu_items("__main laser")
         self.items_left, self.items_right = self.split_by_orientation(items)
         super().__init__(screen, title, items)
         logging.info("### Making LaserMenu")
         self.dist_buttons = {}
+        self.state_objects = self.find_state_objects()
 
         grid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True, hexpand=True, vexpand=True)
         grid.attach(self.create_left_panel(), 0, 0, 1, 1)
@@ -63,6 +68,37 @@ class Panel(MenuPanel):
             self.scroll.remove(child)
         columns = 3 if self._screen.vertical_mode else 2
         self.scroll.add(self.arrangeMenuItems(self.items_right, columns, True))
+        # KlipperScreen only subscribes to output_pin objects, so poll any pwm_tool pins while the panel is shown
+        if self.poll_timer is None and self.unsubscribed_objects():
+            logging.debug(f"Polling {self.unsubscribed_objects()} every {self.poll_interval_ms} ms")
+            self.poll_timer = GLib.timeout_add(self.poll_interval_ms, self.poll_pins)
+
+    def deactivate(self):
+        if self.poll_timer is not None:
+            logging.debug("Stopped polling laser pins")
+            GLib.source_remove(self.poll_timer)
+            self.poll_timer = None
+
+    def find_state_objects(self):
+        sections = self._printer.get_config_section_list()
+        objects = {}
+        for key, pin in self.state_pins.items():
+            for prefix in ("output_pin", "pwm_tool"):
+                if f"{prefix} {pin}" in sections:
+                    objects[key] = f"{prefix} {pin}"
+        return objects
+
+    def unsubscribed_objects(self):
+        return [obj for obj in self.state_objects.values() if not obj.startswith("output_pin ")]
+
+    def poll_pins(self):
+        objects = {obj: ["value"] for obj in self.unsubscribed_objects()}
+        self._screen._ws.send_method("printer.objects.query", {"objects": objects}, self.on_pins_queried)
+        return True
+
+    def on_pins_queried(self, response, method, params):
+        if 'result' in response:
+            self.process_update("notify_status_update", response['result']['status'])
 
     def create_left_panel(self):
         top = Gtk.Grid(row_homogeneous=True, column_homogeneous=True)
@@ -98,11 +134,11 @@ class Panel(MenuPanel):
     def process_update(self, action, data):
         if action != "notify_status_update":
             return
-        for key, pin in self.state_pins.items():
-            if key not in self.labels or pin not in data or 'value' not in data[pin]:
+        for key, obj in self.state_objects.items():
+            if key not in self.labels or obj not in data or 'value' not in data[obj]:
                 continue
             ctx = self.labels[key].get_style_context()
-            if data[pin]['value'] > 0:
+            if data[obj]['value'] > 0:
                 ctx.add_class("button_active")
             else:
                 ctx.remove_class("button_active")
