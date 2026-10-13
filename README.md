@@ -62,6 +62,8 @@ Due to safety concerns I have decided to use a separate switch which controls th
 
 Add the following configs & macros to printer.cfg
 
+The laser PWM pin uses `[pwm_tool]`, which needs Klipper from January 2024 or newer, on both the host and the MCU firmware of the board driving the pin. `[output_pin]` waits at least 100 ms between pin changes, so the laser turns on late after short travel moves and the start of a contour is not burnt.
+
 ```cfg
 #####################################################################
 #   LASER Control
@@ -71,9 +73,8 @@ Add the following configs & macros to printer.cfg
 pin: PB4
 pwm: false
 
-[output_pin laser_pwm_pin]
+[pwm_tool laser_pwm_pin]
 pin: !PD15 
-pwm: true
 cycle_time: 0.001
 
 [gcode_macro M03]
