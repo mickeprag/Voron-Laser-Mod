@@ -16,12 +16,20 @@ LIGHTBURN_BOUNDS_RE = re.compile(
 # Cura: ";MINX:12.3" etc.
 CURA_BOUNDS_RE = re.compile(r";(MINX|MAXX|MINY|MAXY):" + NUMBER)
 MOVE_RE = re.compile(r"G0*([01])(?!\d)")
+POSITIONING_RE = re.compile(r"G9([01])(?!\d)")
 AXIS_RE = re.compile(r"([XY])\s*" + NUMBER)
 
 def _gcode(line):
     # The command part of a G-code line: comment removed, upper-cased
     end = line.find(';')
     return (line if end < 0 else line[:end]).strip().upper()
+
+def _coord(old, value, relative):
+    # New position on one axis; a relative move from an unknown position
+    # stays unknown
+    if not relative:
+        return float(value)
+    return None if old is None else old + float(value)
 
 class LaserBoundariesHelper:
     def __init__(self, config):
@@ -73,10 +81,11 @@ class LaserBoundariesHelper:
             raise gcmd.error("Z level too low")
 
         filename = self.get_newest_file()
-        x_min, x_max, y_min, y_max = self.get_boundaries(filename)
-        gcmd.respond_info("File name: %s" % filename)
+        (x_min, x_max, y_min, y_max), relative = self.get_boundaries(filename, x, y)
+        gcmd.respond_info("File name: %s (%s coordinates)"
+                          % (filename, "relative" if relative else "absolute"))
         gcmd.respond_info("Current Position: x=%.3f, y=%.3f, z=%.3f" % (x,y,z))
-        gcmd.respond_info("Boubdaries: x_min=%.3f, x_max=%.3f, y_min=%.3f, y_max=%.3f" % (x_min, x_max, y_min, y_max))
+        gcmd.respond_info("Boundaries: x_min=%.3f, x_max=%.3f, y_min=%.3f, y_max=%.3f" % (x_min, x_max, y_min, y_max))
         gcmd.respond_info("Max Pos: x_max=%.3f, y_max=%.3f" % (self.x_max_bed, self.y_max_bed))
     
         if x_min<0 or x_max>self.x_max_bed or y_min<0 or y_max>self.y_max_bed:
@@ -87,6 +96,8 @@ class LaserBoundariesHelper:
         self._move([x_max,y_max,None,None], self.speed)
         self._move([x_min,y_max,None,None], self.speed)
         self._move([x_min,y_min,None,None], self.speed)
+        # Return to the start position, which a relative job uses as origin
+        self._move([x,y,None,None], self.speed)
         self._log_config()
 
     def get_newest_file(self):
@@ -98,24 +109,28 @@ class LaserBoundariesHelper:
         else:
             raise self.gcmd.error("Unable to find any files: %s" %(path))
 
-    def get_boundaries(self, filename):
+    def get_boundaries(self, filename, start_x, start_y):
+        # Returns the job's bounds in bed coordinates, and whether it is a
+        # relative job (G91 at the first move, e.g. LightBurn "Start From:
+        # Current Position"), which starts at (start_x, start_y)
         fname = os.path.join(self.sdcard_dirname, filename)
         try:
             with open(fname) as f:
-                bounds = self._find_bounds(f)
+                bounds, relative = self._find_bounds(f, start_x, start_y)
         except IOError:
             logging.exception("laser_boundaries: unable to open %s" % (fname,))
             raise self.gcmd.error("Unable to open file")
         if bounds is None:
             raise self.gcmd.error("No cutting moves found in %s" % (filename,))
-        return bounds
+        return bounds, relative
 
-    def _find_bounds(self, f):
+    def _find_bounds(self, f, start_x, start_y):
         # LightBurn and Cura write boundary comments before the first move.
         # Without them, use the bounds of the G1 (cutting) moves; G0 travel,
         # such as LightBurn's final move to its finish position, is left out.
         # Axes are modal, so a line may set only X or only Y.
-        seen_move = False
+        relative = False
+        job_relative = None  # positioning mode at the first move
         header = None
         cura = {}
         x = y = None
@@ -124,7 +139,10 @@ class LaserBoundariesHelper:
             code = _gcode(line)
             move = MOVE_RE.match(code)
             if not move:
-                if not seen_move:
+                positioning = POSITIONING_RE.match(code)
+                if positioning:
+                    relative = positioning.group(1) == '1'
+                elif job_relative is None:
                     result = LIGHTBURN_BOUNDS_RE.search(line)
                     if result:
                         x_min, y_min, x_max, y_max = map(float, result.groups())
@@ -133,23 +151,31 @@ class LaserBoundariesHelper:
                     if result:
                         cura[result.group(1)] = float(result.group(2))
                 continue
-            if not seen_move:
-                seen_move = True
+            if job_relative is None:
+                job_relative = relative
                 if header is not None or len(cura) == 4:
                     break
+                if relative:
+                    x, y = start_x, start_y
             new_x, new_y = x, y
             for axis, value in AXIS_RE.findall(code, move.end()):
                 if axis == 'X':
-                    new_x = float(value)
+                    new_x = _coord(x, value, relative)
                 else:
-                    new_y = float(value)
+                    new_y = _coord(y, value, relative)
             if move.group(1) == '1' and x is not None and y is not None:
                 bounds = self._extend(bounds, x, y)
                 bounds = self._extend(bounds, new_x, new_y)
             x, y = new_x, new_y
         if header is None and len(cura) == 4:
             header = cura['MINX'], cura['MAXX'], cura['MINY'], cura['MAXY']
-        return header if header is not None else bounds
+        if header is not None:
+            bounds = header
+            if job_relative:
+                x_min, x_max, y_min, y_max = header
+                bounds = (start_x + x_min, start_x + x_max,
+                          start_y + y_min, start_y + y_max)
+        return bounds, bool(job_relative)
 
     @staticmethod
     def _extend(bounds, x, y):
